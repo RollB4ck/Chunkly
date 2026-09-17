@@ -122,40 +122,47 @@ uint64_t get_sv_filesize(int sockfd, file_header *data){
     return filesize;
 }
 
+typedef struct args{
+    char *client_path;
+    int n_segments;
+    int segment_len;
+    uint64_t start_bytes;
+    c_buff *c_buff;
+}writer_args;
 
-int buff_writer(char* client_path,int n_segments,int segment_len,uint64_t start_bytes,c_buff *c_buff){
+int buff_writer(writer_args *args){
 
     FILE *fd;
     unsigned char* payload=NULL;
     uint8_t* chunk_id=NULL;
     unsigned char* data=NULL;
     uint64_t *payload_size=NULL;
-    int c_size=c_buff->size; //size of circular buffer
-    c_buff->count=0;
+    int c_size=args->c_buff->size; //size of circular buffer
+    args->c_buff->count=0;
     
-    printf("[DEBUG] client_path: %s\n",client_path);
-    printf("[DEBUG] n_segments: %d\n",n_segments);
-    printf("[DEBUG] segment_len: %d bytes\n",segment_len);
+    printf("[DEBUG] client_path: %s\n",args->client_path);
+    printf("[DEBUG] n_segments: %d\n",args->n_segments);
+    printf("[DEBUG] segment_len: %d bytes\n",args->segment_len);
 
-    data=malloc(segment_len);
+    data=malloc(args->segment_len);
     if (data == NULL){
         perror("[ERROR] Writer failed to memory allocation");
         return 0;
     }
 
-    fd=fopen(client_path,"rb");
+    fd=fopen(args->client_path,"rb");
     if(fd == NULL){
         ferror (fd);
         return 0;
     }
 
-    fseek(fd,start_bytes,SEEK_SET); //init file pointer
-    for(c_buff->tail=0; c_buff->tail<n_segments; c_buff->tail++){
-        chunk_id=&c_buff->buff[c_buff->tail].id;
-        payload=c_buff->buff[c_buff->tail].payload;
-        payload_size=&c_buff->buff[c_buff->head].payload_size;
+    fseek(fd,args->start_bytes,SEEK_SET); //init file pointer
+    for(args->c_buff->tail=0; args->c_buff->tail<args->n_segments; args->c_buff->tail++){
+        chunk_id=&args->c_buff->buff[args->c_buff->tail].id;
+        payload=args->c_buff->buff[args->c_buff->tail].payload;
+        payload_size=&args->c_buff->buff[args->c_buff->head].payload_size;
 
-        size_t bytes_read=fread(data,1,segment_len,fd); //read segment from file
+        size_t bytes_read=fread(data,1,args->segment_len,fd); //read segment from file
         *payload_size=bytes_read;
         payload=malloc(bytes_read);
         if(payload==NULL){
@@ -165,18 +172,18 @@ int buff_writer(char* client_path,int n_segments,int segment_len,uint64_t start_
 
         /*check if the ring buffer is not full AND if the distance between reader and writer is not 0 OR if (tail - head) return 0 
         --> count is set to zero only if reader has already read everything. In this case, writer can write to buffer*/
-        if(c_buff->count<c_size && (c_buff->tail-c_buff->head) !=0 || c_buff->count == 0){
+        if(args->c_buff->count<c_size && (args->c_buff->tail-args->c_buff->head) !=0 || args->c_buff->count == 0){
             //writer write to buffer
-            *chunk_id=c_buff->tail;
+            *chunk_id=args->c_buff->tail;
             memcpy(payload,data,bytes_read);
             //printf("[DEBUG] tail: %d\n",c_buff->tail);
-            c_buff->count++;
+            args->c_buff->count++;
 
         }else{
             //wait for the reader
             printf("[INFO] buffer is full, waiting reader..\n");
-            printf("[DEBUG] counter: %d\n",c_buff->count);
-            while(c_buff->count != 0){
+            printf("[DEBUG] counter: %d\n",args->c_buff->count);
+            while(args->c_buff->count != 0){
                 usleep(1000);
             }
         }
@@ -217,24 +224,33 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *c_buff){
 int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
 
     int n_segments=1;
+    int status=-1;
     c_buff c_buff;
     FILE *fd;
-    pthread_t reader;
+    pthread_t writer;
+    writer_args args;
 
     c_buff.count=0;
     c_buff.head=0;
     c_buff.tail=0;
     c_buff.size=sizeof(c_buff.buff)/sizeof*(c_buff.buff);
 
-    printf("[INFO] File size: %" PRIu64 " bytes\n",filesize);
+    args.c_buff=&c_buff;
+    args.client_path=client_path;
+    args.n_segments=n_segments;
+    args.segment_len=segment_len;
+    args.start_bytes=start_bytes;
+
+    printf("[DEBUG] File size: %" PRIu64 " bytes\n",filesize);
     if(filesize>segment_len){
         n_segments=(filesize/segment_len)+1; //calculate number of total file segments
     }else{
         printf("[INFO] File size is lower than segments length configured. Skipping segmentation...\n");
     }
 
+    status = pthread_create(&writer,NULL,buff_writer,&args);
     //buff_writer(client_path,n_segments,segment_len,start_bytes,&c_buff);
-    //buff_reader(sockfd,n_segments,segment_len,&c_buff);
+    buff_reader(sockfd,n_segments,segment_len,&c_buff);
     //print_c_buff(&c_buff);
     //pthread_create(&reader,NULL,buff_reader,*args);
     //pthread_join(reader, NULL);

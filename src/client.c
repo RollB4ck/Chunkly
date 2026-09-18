@@ -67,6 +67,15 @@ typedef struct CircularBuffer{
     file_node buff[50];
 }c_buff;
 
+//args for buff_wrtier function
+typedef struct args{
+    char *client_path;
+    int n_segments;
+    int segment_len;
+    uint64_t start_bytes;
+    c_buff *c_buff;
+}writer_args;
+
 //helper function
 void help(){
 
@@ -122,23 +131,28 @@ uint64_t get_sv_filesize(int sockfd, file_header *data){
     return filesize;
 }
 
-typedef struct args{
-    char *client_path;
-    int n_segments;
-    int segment_len;
-    uint64_t start_bytes;
-    c_buff *c_buff;
-}writer_args;
+int debug_circular_buff(){
+    
+}
 
-int buff_writer(writer_args *args){
+void* buff_writer(void *w_args){
 
     FILE *fd;
-    unsigned char* payload=NULL;
+    unsigned char* payload=NULL,*data=NULL;
     uint8_t* chunk_id=NULL;
-    unsigned char* data=NULL;
     uint64_t *payload_size=NULL;
-    int c_size=args->c_buff->size; //size of circular buffer
-    args->c_buff->count=0;
+    int c_size, *tail, *head, *n_segments, *segment_len,*count;
+    writer_args *args;
+    size_t bytes_read;
+
+    //init vars
+    args=w_args; //args passed by thread
+    c_size=args->c_buff->size; //size of circular buffer
+    tail = &args->c_buff->tail;
+    head = &args->c_buff->head;
+    n_segments= &args->n_segments;
+    segment_len = &args->segment_len;
+    count=&args->c_buff->count;
     
     printf("[DEBUG] client_path: %s\n",args->client_path);
     printf("[DEBUG] n_segments: %d\n",args->n_segments);
@@ -157,33 +171,34 @@ int buff_writer(writer_args *args){
     }
 
     fseek(fd,args->start_bytes,SEEK_SET); //init file pointer
-    for(args->c_buff->tail=0; args->c_buff->tail<args->n_segments; args->c_buff->tail++){
-        chunk_id=&args->c_buff->buff[args->c_buff->tail].id;
-        payload=args->c_buff->buff[args->c_buff->tail].payload;
-        payload_size=&args->c_buff->buff[args->c_buff->head].payload_size;
+    for(*tail=0; *tail<*n_segments; (*tail)++){
+        chunk_id=&args->c_buff->buff[*tail].id;
+        payload_size=&args->c_buff->buff[*tail].payload_size;
 
-        size_t bytes_read=fread(data,1,args->segment_len,fd); //read segment from file
+        bytes_read=fread(data,1,*segment_len,fd); //read segment from file
         *payload_size=bytes_read;
-        payload=malloc(bytes_read);
-        if(payload==NULL){
+        args->c_buff->buff[*tail].payload=malloc(bytes_read);
+        if(args->c_buff->buff[*tail].payload==NULL){
             perror("[ERROR] Writer failed to memory allocation");
-            return 0;
+            free(data);
+            fclose(fd);
+            return NULL;
         }
 
         /*check if the ring buffer is not full AND if the distance between reader and writer is not 0 OR if (tail - head) return 0 
         --> count is set to zero only if reader has already read everything. In this case, writer can write to buffer*/
-        if(args->c_buff->count<c_size && (args->c_buff->tail-args->c_buff->head) !=0 || args->c_buff->count == 0){
+        if(*count < c_size && (*tail - *head) !=0 || *count == 0){
             //writer write to buffer
-            *chunk_id=args->c_buff->tail;
-            memcpy(payload,data,bytes_read);
+            *chunk_id=*tail;
+            memcpy(args->c_buff->buff[*tail].payload,data,bytes_read);
             //printf("[DEBUG] tail: %d\n",c_buff->tail);
-            args->c_buff->count++;
+            (*count)++;
 
         }else{
             //wait for the reader
             printf("[INFO] buffer is full, waiting reader..\n");
-            printf("[DEBUG] counter: %d\n",args->c_buff->count);
-            while(args->c_buff->count != 0){
+            //printf("[DEBUG] counter: %d\n",*count);
+            while(*count != 0){
                 usleep(1000);
             }
         }
@@ -196,18 +211,32 @@ int buff_writer(writer_args *args){
 
 int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *c_buff){
 
-    for(c_buff->head=0; c_buff->head<n_segments; c_buff->head++){
+    // init vars
+    int *head, *tail, *count, bytes_sent=0;
+    head=&c_buff->head;
+    tail=&c_buff->tail;
+    count=&c_buff->count;
+
+    for(*head=0; *head<n_segments; (*head)++){
         /* check if the distance between reader and writer is not 0 OR if (tail - head) return 0 
         --> count is > of zero only if reader has not read everything. In this case, the reade rcan read another data*/
-        if((c_buff->tail-c_buff->head) !=0 || c_buff->count > 0){
+        if((*tail - *head) !=0 || *count > 0){
             //reader send file to tcp server
-            send_data(sockfd,c_buff->buff,c_buff->buff->payload_size);
-            c_buff->count--;
+            printf("[DEBUG] payload size: %" PRIu64 "\n",c_buff->buff[*head].payload_size);
+            bytes_sent=send_data(sockfd,c_buff->buff[*head].payload,c_buff->buff[*head].payload_size);
+            if(bytes_sent!=c_buff->buff[*head].payload_size){
+                printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
+                exit(0);
+            }
+            //free(c_buff->buff[*head].payload);
+            //c_buff->buff[*head].payload=NULL;
+            (*count)--;
 
         }else{
             //wait for the writer
             printf("[INFO] buffer is empty, waiting writer..\n");
-            while(c_buff->count == 0){
+            while(*count == 0){
+                printf("[DEBUG] counter:%d\n",c_buff->count);
                 usleep(1000);
             }
         }
@@ -230,11 +259,12 @@ int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesi
     pthread_t writer;
     writer_args args;
 
-    c_buff.count=0;
+    c_buff.count=0; //init counter to 0
     c_buff.head=0;
     c_buff.tail=0;
     c_buff.size=sizeof(c_buff.buff)/sizeof*(c_buff.buff);
 
+    //args for buff_writer function
     args.c_buff=&c_buff;
     args.client_path=client_path;
     args.n_segments=n_segments;
@@ -249,11 +279,11 @@ int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesi
     }
 
     status = pthread_create(&writer,NULL,buff_writer,&args);
-    //buff_writer(client_path,n_segments,segment_len,start_bytes,&c_buff);
+    //buff_writer(&args);
     buff_reader(sockfd,n_segments,segment_len,&c_buff);
+
     //print_c_buff(&c_buff);
-    //pthread_create(&reader,NULL,buff_reader,*args);
-    //pthread_join(reader, NULL);
+    pthread_join(writer, NULL);
     return 0;
 }
 

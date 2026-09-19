@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h> 
 #include <arpa/inet.h>
 #include <netdb.h>
 
@@ -60,6 +61,9 @@ int open_tcp_socket(char* data){
         printf("[ERROR] Connection to host failed\n");
         return -1;
     }
+    //deactivate NAGLE
+    int flag = 1;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
     return sockfd;                                 
 }
 

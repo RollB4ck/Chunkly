@@ -1,3 +1,13 @@
+/* We want POSIX.1-2008 + XSI, i.e. SuSv4, features */
+#define _XOPEN_SOURCE 700
+
+/* Added on 2017-06-25:
+   If the C library can support 64-bit file sizes
+   and offsets, using the standard names,
+   these defines tell the C library to do so. */
+#define _LARGEFILE64_SOURCE
+#define _FILE_OFFSET_BITS 64 
+
 #define _GNU_SOURCE
 #include <string.h>
 #include <stdio.h>
@@ -7,8 +17,15 @@
 #include <inttypes.h>
 #include <pthread.h>
 #include <ctype.h>
+#include <ftw.h>
+#include <errno.h>
 
 #include "tcp_client.h"
+
+//max 15 sub-directories for directory transfers
+#ifndef USE_FDS
+#define USE_FDS 15
+#endif
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mute exclusion for buffer threading
 static pthread_cond_t cond_not_full = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
@@ -33,20 +50,12 @@ static pthread_cond_t cond_not_empty = PTHREAD_COND_INITIALIZER; // used for syn
  ----------------------------------------------------------------|
 */
 
-/*
-Il buffer circolare funziona semplicemente con un array statico da n elementi:
-il writer scrive sulla tail, mentre il reader legge dalla head, ma entrambi (tail e head) sono dei CONTATORI (non puntatori) che si muovono nella stessa direzione
-Il writer, prima di sovrascrivere una cella, controlla la head (posizione del reader), se questo non è ancora arrivato a codesta cella si deve bloccare in attesa 
-che ci arrivi
-*/
-
-
 // gcc -Ilib/socket_client/include lib/socket_client/src/tcp_client.c src/client.c
 
 typedef enum {
     MSG_INFO_REQ = 0x01,  // File state request (1 byte)
     MSG_INFO_RES = 0x02,  // Server response (1 byte)
-    //MSG_CHUNK    = 0x03   // Send chunk of file (1 byte)
+    MSG_CHUNKS    = 0x03   // Send chunk of file (1 byte)
 } msg_type_t;
 
 typedef struct Header{
@@ -133,6 +142,53 @@ uint64_t get_sv_filesize(int sockfd, file_header *data){
     send_data(sockfd,data,sizeof(data));
     receive_data(sockfd,&filesize);
     return filesize;
+}
+
+
+//TODO: sostituire la printf con la compilazione e l'invio dell'header e l'esecuzione del buffer
+int get_entry(const char *filepath, const struct stat *info,
+                const int typeflag, struct FTW *pathinfo){
+    /* const char *const filename = filepath + pathinfo->base; */
+    const double bytes = (double)info->st_size; /* Not exact if large! */
+    char base_name[512];
+    uint64_t srv_filesize=0; //filesize returned by server if file is already present
+    file_header header;
+
+    if (typeflag == FTW_F){
+        //printf(" %s\n", filepath);
+        //path basename (eg. "/home/test/hello.txt" to "hello.txt")
+        snprintf(base_name, sizeof(base_name), "%s", basename(filepath));
+
+        //build header
+        header.type=MSG_CHUNKS;
+        header.fileName=base_name;
+        header.fileName_len=strlen(base_name);
+        header.file_size=bytes;
+
+        //get server file size (if present)
+        //srv_filesize=get_sv_filesize(sockfd,&header);
+
+        //circular buffer core
+        circular_buffer(filepath,sockfd,segment_len,header.file_size,srv_filesize);
+
+    }
+
+    return 0;
+}
+
+int get_directory_tree(const char *const dirpath)
+{
+    int result;
+
+    /* Invalid directory path? */
+    if (dirpath == NULL || *dirpath == '\0')
+        return errno = EINVAL;
+
+    result = nftw(dirpath, get_entry, USE_FDS, FTW_PHYS);
+    if (result >= 0)
+        errno = result;
+
+    return errno;
 }
 
 //TODO: remove chunkid from protocol
@@ -289,15 +345,15 @@ int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesi
 
 int main(int argc, char* argv[]){
 
+
+
     //network vars
     int sockfd;
 
     //file management vars
-    file_header header;
     file_node file;
-    char base_name[512];
     int segment_len=1*1000000; //length of segments in bytes (default: 1Mb)
-    uint64_t srv_filesize=0; //filesize returned by server if file is already present
+    int result;
 
 //flags definition
     //flag vars
@@ -345,33 +401,24 @@ int main(int argc, char* argv[]){
         printf ("Non-option argument %s\n", argv[index]);
 //end of flags
 
-
-    //path basename (eg. "/home/test/hello.txt" to "hello.txt")
-    snprintf(base_name, sizeof(base_name), "%s", basename(client_path));
     //Add final slash to path if not present
-    size_t len = strlen(server_path);
+    /*size_t len = strlen(server_path);
     if (len > 0 && server_path[len - 1] != '/') {
         snprintf(server_path+len, 2, "/");
-    }
+    }*/
 
     //Open TCP socket
     sockfd=open_tcp_socket(hostname);
 
-    //get server file size (if present)
-    //srv_filesize=get_sv_filesize(sockfd,&header);
+    /* Invalid directory path? */
+    if (client_path == NULL || *client_path == '\0'){
+        return errno = EINVAL;
+    }
 
-    //build protocol for segmentation
-    //header.type=MSG_CHUNK;
-    header.fileName=base_name;
-    header.fileName_len=strlen(base_name);
-    header.file_size=get_lc_filesize(client_path);
-
-    //printf("[DEBUG] filename: %s\n",header.fileName);
-    //printf("[DEBUG] filename length: %" PRIu32 "\n",header.fileName_len);
-
-    //circular buffer core
-    circular_buffer(client_path,sockfd,segment_len,header.file_size,srv_filesize);
-
+    result = nftw(client_path, get_entry, USE_FDS, FTW_PHYS);
+    if (result >= 0){
+        return errno;
+    }
     
     if(close(sockfd)<0){
         printf("[ERROR] Failed to close connection\n");

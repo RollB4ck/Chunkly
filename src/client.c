@@ -10,6 +10,10 @@
 
 #include "tcp_client.h"
 
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mute exclusion for buffer threading
+static pthread_cond_t cond_not_full = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
+static pthread_cond_t cond_not_empty = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
+
 /*
  Protocol L7:
  ----------------------------------------------------------------|
@@ -41,8 +45,8 @@ che ci arrivi
 
 typedef enum {
     MSG_INFO_REQ = 0x01,  // File state request (1 byte)
-    //MSG_INFO_RES = 0x02,  // Server response (1 byte)
-    MSG_CHUNK    = 0x03   // Send chunk of file (1 byte)
+    MSG_INFO_RES = 0x02,  // Server response (1 byte)
+    //MSG_CHUNK    = 0x03   // Send chunk of file (1 byte)
 } msg_type_t;
 
 typedef struct Header{
@@ -131,17 +135,19 @@ uint64_t get_sv_filesize(int sockfd, file_header *data){
     return filesize;
 }
 
-int debug_circular_buff(){
-    
-}
+//TODO: remove chunkid from protocol
 
-//TODO: i dati vengono inviati in ordine
+/**
+     * Writer of Circular Buffer. It writes payload from file to buffer
+     * @param w_args writer arguments (see args struct)
+     */
 void* buff_writer(void *w_args){
 
     FILE *fd;
-    unsigned char* payload=NULL,*data=NULL;
+    unsigned char *temp_payload=NULL,*data=NULL;
     c_buff *cb;
     writer_args *args;
+    int bytes_read=0;
 
     //init vars
     args=w_args; //args passed by thread
@@ -166,60 +172,73 @@ void* buff_writer(void *w_args){
     fseek(fd,args->start_bytes,SEEK_SET); //init file pointer
 
     for(int i=0; i< args->n_segments; i++){
-        //wait for the reader
-        while(cb->count == cb->size){
-            usleep(1000);
-        }
 
-        cb->buff[cb->tail].payload_size=fread(data,1,args->segment_len,fd); //read segment from file
-        //printf("[DEBUG] counter: %d\n",cb->count);
-        //printf("[DEBUG] tail: %d\n",cb->tail);
-        //printf("[DEBUG] payload size from writer: %" PRIu64 "\n",*payload_size);
-        cb->buff[cb->tail].payload=malloc(cb->buff[cb->tail].payload_size);
-        if(cb->buff[cb->tail].payload==NULL){
+        bytes_read=fread(data,1,args->segment_len,fd); //read segment from file
+        temp_payload=malloc(bytes_read); //allocation of memory for payload
+        memcpy(temp_payload,data,bytes_read); //insert segment to payload
+        
+        if(temp_payload==NULL){
             perror("[ERROR] Writer failed to memory allocation");
             free(data);
             fclose(fd);
             return NULL;
         }
 
+        pthread_mutex_lock(&mutex); //lock for mute exclusion
+        while(cb->count == cb->size){
+            pthread_cond_wait(&cond_not_full, &mutex); //waiting reader
+        }
+
         //writer write to buffer
-        cb->buff[cb->tail].id=i;
-        memcpy(cb->buff[cb->tail].payload,data,cb->buff[cb->tail].payload_size);
+        cb->buff[cb->tail].payload_size = bytes_read;
+        cb->buff[cb->tail].payload = temp_payload;
+
         cb->tail = (cb->tail + 1) % cb->size; //if tail is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
         cb->count++;
+        pthread_cond_signal(&cond_not_empty); //signal for reader wake up
+        pthread_mutex_unlock(&mutex);
     }
-
     free(data);
     fclose(fd);
-
 }
 
+/**
+     * Reader of Circular Buffer. It reads payload from buffer and send it to destination server
+     * @param sockfd socket descriptor
+     * @param n_segments number of total segments to send
+     * @param segment_len length of single segment
+     * @param cb circular buffer object
+     */
 int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
 
     // init vars
+    unsigned char* payload=NULL;
+    uint64_t payload_size=0;
     int bytes_sent=0;
     
     for(int i=0; i<n_segments; i++){
-        //wait for the writer
+
+        pthread_mutex_lock(&mutex); //lock for mute exclusion
         while(cb->count == 0){
-            //printf("[DEBUG] counter:%d\n",c_buff->count);
-            usleep(1000);
+            pthread_cond_wait(&cond_not_empty, &mutex); //waiting writer
         }
+
+        payload_size=cb->buff[cb->head].payload_size;
+        payload = cb->buff[cb->head].payload;
+        cb->head = (cb->head + 1) % cb->size; //if head is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
+        cb->count--;
+        pthread_cond_signal(&cond_not_full); //signal for writer wake up
+        pthread_mutex_unlock(&mutex);
+
         //reader send file to tcp server
-        //printf("[DEBUG] head: %d\n",cb->head);
-        //printf("[DEBUG] payload size from reader: %" PRIu64 "\n",cb->buff[cb->head].payload_size);
-        bytes_sent=send_data(sockfd,cb->buff[cb->head].payload,cb->buff[cb->head].payload_size);
-        if(bytes_sent!=cb->buff[cb->head].payload_size){
+        bytes_sent=send_data(sockfd,payload,payload_size);
+        if(bytes_sent!=payload_size){
             printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
             return 0;
         }
-        free(cb->buff[cb->head].payload);
-        //c_buff->buff[*head].payload=NULL;
-        cb->head = (cb->head + 1) % cb->size; //if head is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
-        cb->count--;
-
+        free(payload);
     }
+    return 1;
 }
 
 /**
@@ -231,7 +250,6 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
 int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
 
     int n_segments=1;
-    int status=-1;
     c_buff c_buff;
     FILE *fd;
     pthread_t writer;
@@ -257,8 +275,10 @@ int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesi
     args.segment_len=segment_len;
     args.start_bytes=start_bytes;
 
-
-    status = pthread_create(&writer,NULL,buff_writer,&args);
+    if (pthread_create(&writer,NULL,buff_writer,&args) != 0){
+        printf("[ERROR] Cannot create writer thread\n");
+        return 0;
+    }
     //buff_writer(&args);
     buff_reader(sockfd,n_segments,segment_len,&c_buff);
 
@@ -341,7 +361,7 @@ int main(int argc, char* argv[]){
     //srv_filesize=get_sv_filesize(sockfd,&header);
 
     //build protocol for segmentation
-    header.type=MSG_CHUNK;
+    //header.type=MSG_CHUNK;
     header.fileName=base_name;
     header.fileName_len=strlen(base_name);
     header.file_size=get_lc_filesize(client_path);

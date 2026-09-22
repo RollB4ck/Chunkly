@@ -26,11 +26,6 @@
 #ifndef USE_FDS
 #define USE_FDS 15
 #endif
-
-static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mute exclusion for buffer threading
-static pthread_cond_t cond_not_full = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
-static pthread_cond_t cond_not_empty = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
-
 /*
  Protocol L7:
  ----------------------------------------------------------------|
@@ -61,7 +56,7 @@ typedef enum {
 typedef struct Header{
     uint8_t type; //message type
     uint32_t fileName_len; //length of filename in big endian
-    char *fileName; //name of file in little endian
+    const char *fileName; //name of file in little endian
     uint64_t file_size; //size of file in big endian
 
 }file_header;
@@ -82,12 +77,24 @@ typedef struct CircularBuffer{
 
 //args for buff_wrtier function
 typedef struct args{
-    char *client_path;
+    const char *client_path;
     int n_segments;
     int segment_len;
     uint64_t start_bytes;
     c_buff *c_buff;
 }writer_args;
+
+//used to transfer context in nftw() POSIX function
+typedef struct {
+    int sockfd;
+    int segment_len;
+}transfer_context_t;
+
+static transfer_context_t ctx; //
+
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mute exclusion for buffer threading
+static pthread_cond_t cond_not_full = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
+static pthread_cond_t cond_not_empty = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
 
 //helper function
 void help(){
@@ -142,53 +149,6 @@ uint64_t get_sv_filesize(int sockfd, file_header *data){
     send_data(sockfd,data,sizeof(data));
     receive_data(sockfd,&filesize);
     return filesize;
-}
-
-
-//TODO: sostituire la printf con la compilazione e l'invio dell'header e l'esecuzione del buffer
-int get_entry(const char *filepath, const struct stat *info,
-                const int typeflag, struct FTW *pathinfo){
-    /* const char *const filename = filepath + pathinfo->base; */
-    const double bytes = (double)info->st_size; /* Not exact if large! */
-    char base_name[512];
-    uint64_t srv_filesize=0; //filesize returned by server if file is already present
-    file_header header;
-
-    if (typeflag == FTW_F){
-        //printf(" %s\n", filepath);
-        //path basename (eg. "/home/test/hello.txt" to "hello.txt")
-        snprintf(base_name, sizeof(base_name), "%s", basename(filepath));
-
-        //build header
-        header.type=MSG_CHUNKS;
-        header.fileName=base_name;
-        header.fileName_len=strlen(base_name);
-        header.file_size=bytes;
-
-        //get server file size (if present)
-        //srv_filesize=get_sv_filesize(sockfd,&header);
-
-        //circular buffer core
-        circular_buffer(filepath,sockfd,segment_len,header.file_size,srv_filesize);
-
-    }
-
-    return 0;
-}
-
-int get_directory_tree(const char *const dirpath)
-{
-    int result;
-
-    /* Invalid directory path? */
-    if (dirpath == NULL || *dirpath == '\0')
-        return errno = EINVAL;
-
-    result = nftw(dirpath, get_entry, USE_FDS, FTW_PHYS);
-    if (result >= 0)
-        errno = result;
-
-    return errno;
 }
 
 //TODO: remove chunkid from protocol
@@ -303,7 +263,7 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
      * @param filesize size of clt file
      * @param start_bytes size of srv file (so the start point of buff_writer)
      */
-int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
+int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
 
     int n_segments=1;
     c_buff c_buff;
@@ -343,23 +303,47 @@ int circular_buffer(char* client_path,int sockfd,int segment_len,uint64_t filesi
     return 0;
 }
 
+//TODO: sostituire la printf con la compilazione e l'invio dell'header e l'esecuzione del buffer
+int get_entry( const char *filepath, const struct stat *info,
+                const int typeflag, struct FTW *pathinfo){
+
+    const char *const filename = filepath + pathinfo->base; //basename
+    const double bytes = (double)info->st_size; /* Not exact if large! */
+    char base_name[512];
+    uint64_t srv_filesize=0; //filesize returned by server if file is already present
+    file_header header;
+
+    if (typeflag == FTW_F){
+        printf(" %s...", filepath);
+
+        //build header
+        header.type=MSG_CHUNKS;
+        header.fileName=filename;
+        header.fileName_len=strlen(base_name);
+        header.file_size=bytes;
+
+        //get server file size (if present)
+        //srv_filesize=get_sv_filesize(sockfd,&header);
+
+        //circular buffer core
+        circular_buffer(filepath,ctx.sockfd,ctx.segment_len,header.file_size,srv_filesize);
+    }
+    return 0;
+}
+
 int main(int argc, char* argv[]){
-
-
-
     //network vars
     int sockfd;
 
     //file management vars
     file_node file;
     int segment_len=1*1000000; //length of segments in bytes (default: 1Mb)
-    int result;
 
 //flags definition
     //flag vars
     char *hostname = NULL; //destionation server
     char *server_path = NULL; // destionation path of server
-    char *client_path = NULL; // file
+    const char *client_path; // file
     int index;
     int c;
 
@@ -410,19 +394,22 @@ int main(int argc, char* argv[]){
     //Open TCP socket
     sockfd=open_tcp_socket(hostname);
 
+    //set context for nftw
+    ctx.segment_len=segment_len;
+    ctx.sockfd=sockfd;
+
     /* Invalid directory path? */
     if (client_path == NULL || *client_path == '\0'){
-        return errno = EINVAL;
+        printf("[ERROR] invalid client path\n");
+        close(sockfd);
+        return 0;
     }
-
-    result = nftw(client_path, get_entry, USE_FDS, FTW_PHYS);
-    if (result >= 0){
-        return errno;
+    //add error for invalid path
+    if (nftw(client_path, get_entry, USE_FDS, FTW_PHYS) >= 0){
+        printf("[ERROR] nftw() return error\n");
     }
     
-    if(close(sockfd)<0){
-        printf("[ERROR] Failed to close connection\n");
-    }
+    close(sockfd);
 
     return 0;
     

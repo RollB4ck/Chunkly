@@ -55,8 +55,8 @@ typedef enum {
 
 typedef struct Header{
     uint8_t type; //message type
-    uint32_t fileName_len; //length of filename in big endian
-    const char *fileName; //name of file in little endian
+    uint32_t filepath_len; //length of filepath string in big endian
+    const char *dest_filepath; //name of file in little endian
     uint64_t file_size; //size of file in big endian
 
 }file_header;
@@ -88,6 +88,8 @@ typedef struct args{
 typedef struct {
     int sockfd;
     int segment_len;
+    const char* server_path;
+
 }transfer_context_t;
 
 static transfer_context_t ctx; //
@@ -303,11 +305,11 @@ int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t 
     return 0;
 }
 
-//TODO: sostituire la printf con la compilazione e l'invio dell'header e l'esecuzione del buffer
+//TODO: aggiungere server_path + filepath in dest_filepath
 int get_entry( const char *filepath, const struct stat *info,
                 const int typeflag, struct FTW *pathinfo){
 
-    const char *const filename = filepath + pathinfo->base; //basename
+    /*const char *const filename = filepath + pathinfo->base; //basename*/
     const double bytes = (double)info->st_size; /* Not exact if large! */
     char base_name[512];
     uint64_t srv_filesize=0; //filesize returned by server if file is already present
@@ -318,8 +320,11 @@ int get_entry( const char *filepath, const struct stat *info,
 
         //build header
         header.type=MSG_CHUNKS;
-        header.fileName=filename;
-        header.fileName_len=strlen(base_name);
+        header.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
+        strcpy(header.dest_filepath,ctx.server_path);
+        strcat(header.dest_filepath,filepath);
+        header.dest_filepath=filepath;
+        header.filepath_len=strlen(filepath);
         header.file_size=bytes;
 
         //get server file size (if present)
@@ -342,7 +347,7 @@ int main(int argc, char* argv[]){
 //flags definition
     //flag vars
     char *hostname = NULL; //destionation server
-    char *server_path = NULL; // destionation path of server
+    const char *server_path; // destionation path of server
     const char *client_path; // file
     int index;
     int c;
@@ -397,6 +402,7 @@ int main(int argc, char* argv[]){
     //set context for nftw
     ctx.segment_len=segment_len;
     ctx.sockfd=sockfd;
+    ctx.server_path=server_path;
 
     /* Invalid directory path? */
     if (client_path == NULL || *client_path == '\0'){
@@ -405,8 +411,8 @@ int main(int argc, char* argv[]){
         return 0;
     }
     //add error for invalid path
-    if (nftw(client_path, get_entry, USE_FDS, FTW_PHYS) >= 0){
-        printf("[ERROR] nftw() return error\n");
+    if (nftw(client_path, get_entry, USE_FDS, FTW_PHYS) != 0){
+        fprintf(stderr, "[ERROR] invalid client path");
     }
     
     close(sockfd);

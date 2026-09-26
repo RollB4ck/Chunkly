@@ -53,16 +53,12 @@ typedef enum {
     MSG_CHUNKS    = 0x03   // Send chunk of file (1 byte)
 } msg_type_t;
 
-typedef struct Header{
+typedef struct Node{
     uint8_t type; //message type
+    //uint8_t id; //chunk ID
     uint32_t filepath_len; //length of filepath string in big endian
     const char *dest_filepath; //name of file in little endian
     uint64_t file_size; //size of file in big endian
-
-}file_header;
-
-typedef struct Node{
-    uint8_t id; //chunk ID
     uint64_t payload_size; //size of payload
     unsigned char *payload; //content of payload
 }file_node;
@@ -82,6 +78,7 @@ typedef struct args{
     int segment_len;
     uint64_t start_bytes;
     c_buff *c_buff;
+    file_node *node;
 }writer_args;
 
 //used to transfer context in nftw() POSIX function
@@ -116,7 +113,7 @@ void help(){
 void print_c_buff(c_buff *buff){
     for(int i=0; i<buff->tail; i++){
         printf("Node %d:\n",i);
-        printf("ID: %" PRIu8 "\n",buff->buff[i].id);
+        //printf("ID: %" PRIu8 "\n",buff->buff[i].id);
     }
 }
 
@@ -145,7 +142,7 @@ uint64_t get_lc_filesize(char *path){
      * @param data metadata of file
      * @return size of file
      */
-uint64_t get_sv_filesize(int sockfd, file_header *data){
+uint64_t get_sv_filesize(int sockfd, file_node *data){
     uint64_t filesize;
     data->type=MSG_INFO_REQ;
     send_data(sockfd,data,sizeof(data));
@@ -164,12 +161,14 @@ void* buff_writer(void *w_args){
     FILE *fd;
     unsigned char *temp_payload=NULL,*data=NULL;
     c_buff *cb;
+    file_node *node;
     writer_args *args;
     int bytes_read=0;
 
     //init vars
     args=w_args; //args passed by thread
     cb=args->c_buff;
+    node=args->node;
     
     printf("[DEBUG] client_path: %s\n",args->client_path);
     printf("[DEBUG] n_segments: %d\n",args->n_segments);
@@ -194,6 +193,7 @@ void* buff_writer(void *w_args){
         bytes_read=fread(data,1,args->segment_len,fd); //read segment from file
         temp_payload=malloc(bytes_read); //allocation of memory for payload
         memcpy(temp_payload,data,bytes_read); //insert segment to payload
+
         
         if(temp_payload==NULL){
             perror("[ERROR] Writer failed to memory allocation");
@@ -208,6 +208,10 @@ void* buff_writer(void *w_args){
         }
 
         //writer write to buffer
+        cb->buff[cb->tail].dest_filepath=node->dest_filepath;
+        cb->buff[cb->tail].file_size=node->file_size;
+        cb->buff[cb->tail].filepath_len=node->filepath_len;
+        cb->buff[cb->tail].type=node->type;
         cb->buff[cb->tail].payload_size = bytes_read;
         cb->buff[cb->tail].payload = temp_payload;
 
@@ -230,9 +234,10 @@ void* buff_writer(void *w_args){
 int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
 
     // init vars
-    unsigned char* payload=NULL;
-    uint64_t payload_size=0;
+    //unsigned char* payload=NULL;
+    uint64_t segment_size=0;
     int bytes_sent=0;
+    file_node *segment;
     
     for(int i=0; i<n_segments; i++){
 
@@ -241,20 +246,23 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
             pthread_cond_wait(&cond_not_empty, &mutex); //waiting writer
         }
 
-        payload_size=cb->buff[cb->head].payload_size;
-        payload = cb->buff[cb->head].payload;
+        //payload_size=cb->buff[cb->head].payload_size;
+        //payload = cb->buff[cb->head].payload;
+        segment_size=sizeof(cb->buff[cb->head]);
+        segment=&cb->buff[cb->head];
         cb->head = (cb->head + 1) % cb->size; //if head is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
         cb->count--;
         pthread_cond_signal(&cond_not_full); //signal for writer wake up
         pthread_mutex_unlock(&mutex);
 
         //reader send file to tcp server
-        bytes_sent=send_data(sockfd,payload,payload_size);
-        if(bytes_sent!=payload_size){
+        //bytes_sent=send_data(sockfd,payload,payload_size);
+        bytes_sent=send_data(sockfd,segment,segment_size);
+        if(bytes_sent!=segment_size){
             printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
             return 0;
         }
-        free(payload);
+        free(segment);
     }
     return 1;
 }
@@ -265,9 +273,10 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
      * @param filesize size of clt file
      * @param start_bytes size of srv file (so the start point of buff_writer)
      */
-int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
+int circular_buffer(const char* client_path,int sockfd,int segment_len,file_node *node,uint64_t start_bytes){
 
     int n_segments=1;
+    uint64_t filesize=node->file_size;
     c_buff c_buff;
     FILE *fd;
     pthread_t writer;
@@ -292,6 +301,7 @@ int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t 
     args.n_segments=n_segments;
     args.segment_len=segment_len;
     args.start_bytes=start_bytes;
+    args.node=node;
 
     if (pthread_create(&writer,NULL,buff_writer,&args) != 0){
         printf("[ERROR] Cannot create writer thread\n");
@@ -313,25 +323,25 @@ int get_entry( const char *filepath, const struct stat *info,
     const double bytes = (double)info->st_size; /* Not exact if large! */
     char base_name[512];
     uint64_t srv_filesize=0; //filesize returned by server if file is already present
-    file_header header;
+    file_node data;
 
     if (typeflag == FTW_F){
         printf(" %s...", filepath);
 
-        //build header
-        header.type=MSG_CHUNKS;
-        header.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
-        strcpy(header.dest_filepath,ctx.server_path);
-        strcat(header.dest_filepath,filepath);
-        header.dest_filepath=filepath;
-        header.filepath_len=strlen(filepath);
-        header.file_size=bytes;
+        //build segment
+        data.type=MSG_CHUNKS;
+        data.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
+        strcpy(data.dest_filepath,ctx.server_path);
+        strcat(data.dest_filepath,filepath);
+        data.dest_filepath=filepath;
+        data.filepath_len=strlen(filepath);
+        data.file_size=bytes;
 
         //get server file size (if present)
         //srv_filesize=get_sv_filesize(sockfd,&header);
 
         //circular buffer core
-        circular_buffer(filepath,ctx.sockfd,ctx.segment_len,header.file_size,srv_filesize);
+        circular_buffer(filepath,ctx.sockfd,ctx.segment_len,&data,srv_filesize);
     }
     return 0;
 }

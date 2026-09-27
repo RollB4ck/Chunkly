@@ -56,7 +56,7 @@ typedef enum {
 typedef struct Header{
     uint8_t type; //message type
     uint32_t filepath_len; //length of filepath string in big endian
-    char *dest_filepath; //name of file in little endian
+    char dest_filepath[256]; //name of file in little endian
     uint64_t file_size; //size of file in big endian
 
 }file_header;
@@ -248,7 +248,9 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
         pthread_mutex_unlock(&mutex);
 
         //reader send file to tcp server
-        //bytes_sent=send_data(sockfd,header,)
+        //send header
+        bytes_sent=send_data(sockfd,cb->header,sizeof(cb->header));
+        //send payload
         bytes_sent=send_data(sockfd,payload,payload_size);
         if(bytes_sent!=payload_size){
             printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
@@ -322,9 +324,10 @@ int get_entry( const char *filepath, const struct stat *info,
 
         //build header
         header.type=MSG_CHUNKS;
-        header.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
+        //header.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
         strcpy(header.dest_filepath,ctx.server_path);
         strcat(header.dest_filepath,filepath);
+        printf("[DEBUG] dest_path: %s\n",header.dest_filepath);
         
         header.filepath_len=strlen(filepath);
         header.file_size=bytes;

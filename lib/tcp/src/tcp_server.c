@@ -10,6 +10,7 @@
 #include <netdb.h>
 
 #define PORT 5000
+#define MAX_CONN 20
 
 /*
 Representation of sockaddr struct. Is usefull annotation for socket coding:
@@ -22,24 +23,23 @@ typedef struct sockaddr_in {
 }sockaddr_in;
 */
 
+//used to transfer context in accept() socket function
+typedef struct {
+    struct sockaddr *addr;
+    socklen_t len;
+}transfer_context_t;
+
+static transfer_context_t ctx;
+
 /**
-     * Open TCP Socket Client.
-     * @param data ip_address or dns
+     * Open TCP Socket server.
      * @return socket descriptor
      */
-int open_tcp_socket(char* data){
+int open_tcp_socket(){
     struct sockaddr_in addr;
     struct hostent *h;
     int sockfd;
     char *ip_addr;
-
-    //Resolve DNS if present
-    if ((h=gethostbyname(data)) == NULL) { 
-        herror("gethostbyname");
-        return -1;
-    }
-    ip_addr=inet_ntoa(*((struct in_addr *)h->h_addr));
-
 
     sockfd=socket(PF_INET, SOCK_STREAM, 0);
     if(sockfd < 0){
@@ -48,23 +48,48 @@ int open_tcp_socket(char* data){
     }
     addr.sin_family=AF_INET;
     addr.sin_port=htons(PORT);
-    if (inet_pton(AF_INET, ip_addr, &addr.sin_addr) <= 0) { //inet_pton convert ipv4/ipv6 from text to binary
+    if (inet_pton(AF_INET, "0.0.0.0", &addr.sin_addr) <= 0) { //inet_pton convert ipv4/ipv6 from text to binary
         printf("[ERROR] Invalid IP \n");
         close(sockfd);
         return -1;
     }
     memset(addr.sin_zero, '\0', sizeof addr.sin_zero); // questo serve, come scritto sopra, a riempire lo spazio rimanente della struttura originale, perche 
-                                                       // scokaddr_in sarebbe in realtà una struttura piu semplice da utilizzare rispetto all'originale
+                                                       // sockaddr_in sarebbe in realtà una struttura piu semplice da utilizzare rispetto all'originale
     //printf("%s", inet_ntoa(addr.sin_addr));
 
-    if(connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0){
-        printf("[ERROR] Connection to host failed\n");
+    if(bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0){
+        printf("[ERROR] Bind to server port failed\n");
         return -1;
     }
-    //deactivate NAGLE
+
+    if(listen(sockfd, MAX_CONN) < 0){
+        printf("[ERROR] Listen to server socket failed\n");
+        return -1;
+    }
+    /*deactivate NAGLE
     int flag = 1;
-    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
-    return sockfd;                                 
+    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));*/
+
+    //setup context for accept() function
+    ctx.addr=(struct sockaddr *)&addr;
+    ctx.len=sizeof(addr);
+
+    return sockfd;                     
+}
+
+/**
+     * Accept TCP connection from host.
+     * @param sockfd socket descriptor
+     * @return socket descriptor for new conenction
+     */
+int accept_connection(int sockfd){
+    int new_sockfd;
+    new_sockfd=accept(sockfd,ctx.addr,&ctx.len);
+    if(new_sockfd < 0){
+        printf("[ERROR] Accept incoming connection failed\n");
+        return -1;
+    }
+    return new_sockfd;
 }
 
 /**
@@ -95,7 +120,7 @@ int receive_data(int sockfd, uint64_t *buff){
     int bytes_rcv;
     bytes_rcv = recv(sockfd, buff, 8, 0);
     if (bytes_rcv < 0){
-        printf("[ERROR] Response by server failed\n");
+        printf("[ERROR] Response by client failed\n");
     }else{
         return bytes_rcv;
     }

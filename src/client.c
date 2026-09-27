@@ -93,7 +93,7 @@ typedef struct {
 
 }transfer_context_t;
 
-static transfer_context_t ctx; //
+static transfer_context_t ctx; 
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER; //mute exclusion for buffer threading
 static pthread_cond_t cond_not_full = PTHREAD_COND_INITIALIZER; // used for synchronization between threads
@@ -250,6 +250,10 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
         //reader send file to tcp server
         //send header
         bytes_sent=send_data(sockfd,cb->header,sizeof(cb->header));
+        if(bytes_sent!=sizeof(cb->header)){
+            printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
+            return 0;
+        }
         //send payload
         bytes_sent=send_data(sockfd,payload,payload_size);
         if(bytes_sent!=payload_size){

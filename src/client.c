@@ -45,7 +45,7 @@
  ----------------------------------------------------------------|
 */
 
-// gcc -Ilib/socket_client/include lib/socket_client/src/tcp_client.c src/client.c
+// gcc -Ilib/tcp/include lib/tcp/src/tcp_client.c src/client.c
 
 typedef enum {
     MSG_INFO_REQ = 0x01,  // File state request (1 byte)
@@ -72,6 +72,7 @@ typedef struct CircularBuffer{
     int tail;
     int count; //used for ambiguity
     int size; //size of circular buffer
+    file_header *header;
     file_node buff[50];
 }c_buff;
 
@@ -118,14 +119,6 @@ void print_c_buff(c_buff *buff){
         printf("Node %d:\n",i);
         printf("ID: %" PRIu8 "\n",buff->buff[i].id);
     }
-}
-
-void print_protocol(file_node *data){
-    printf("TYPE: %" PRIu8 "\n",data->type);
-    printf("PAYLOAD_SIZE: %" PRIu64 "\n",data->payload_size);
-    printf("DESTINATION_PATH: %s\n",data->dest_filepath);
-    printf("FILE_SIZE: %" PRIu64 "\n",data->file_size);
-    printf("FILEPATH_LENGTH: %" PRIu32 "\n",data->filepath_len);
 }
 
 /**
@@ -216,7 +209,6 @@ void* buff_writer(void *w_args){
         //writer write to buffer
         cb->buff[cb->tail].payload_size = bytes_read;
         cb->buff[cb->tail].payload = temp_payload;
-        print_protocol(&cb->buff[cb->tail]);
 
         cb->tail = (cb->tail + 1) % cb->size; //if tail is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
         cb->count++;
@@ -256,6 +248,7 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
         pthread_mutex_unlock(&mutex);
 
         //reader send file to tcp server
+        //bytes_sent=send_data(sockfd,header,)
         bytes_sent=send_data(sockfd,payload,payload_size);
         if(bytes_sent!=payload_size){
             printf("[ERROR] TCP data corruption! (%d bytes sent)\n",bytes_sent);
@@ -272,9 +265,10 @@ int buff_reader(int sockfd,int n_segments,int segment_len,c_buff *cb){
      * @param filesize size of clt file
      * @param start_bytes size of srv file (so the start point of buff_writer)
      */
-int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t filesize,uint64_t start_bytes){
+int circular_buffer(const char* client_path,int sockfd,int segment_len,file_header *header,uint64_t start_bytes){
 
     int n_segments=1;
+    uint64_t filesize=header->file_size;
     c_buff c_buff;
     FILE *fd;
     pthread_t writer;
@@ -284,6 +278,7 @@ int circular_buffer(const char* client_path,int sockfd,int segment_len,uint64_t 
     c_buff.head=0;
     c_buff.tail=0;
     c_buff.size=sizeof(c_buff.buff)/sizeof*(c_buff.buff);
+    c_buff.header=header;
 
     //calculate n_segments
     printf("[DEBUG] File size: %" PRIu64 " bytes\n",filesize);
@@ -330,7 +325,7 @@ int get_entry( const char *filepath, const struct stat *info,
         header.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
         strcpy(header.dest_filepath,ctx.server_path);
         strcat(header.dest_filepath,filepath);
-        header.dest_filepath=filepath;
+        
         header.filepath_len=strlen(filepath);
         header.file_size=bytes;
 
@@ -338,7 +333,7 @@ int get_entry( const char *filepath, const struct stat *info,
         //srv_filesize=get_sv_filesize(sockfd,&header);
 
         //circular buffer core
-        circular_buffer(filepath,ctx.sockfd,ctx.segment_len,header.file_size,srv_filesize);
+        circular_buffer(filepath,ctx.sockfd,ctx.segment_len,&header,srv_filesize);
     }
     return 0;
 }

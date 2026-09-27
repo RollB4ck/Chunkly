@@ -50,14 +50,14 @@
 typedef enum {
     MSG_INFO_REQ = 0x01,  // File state request (1 byte)
     MSG_INFO_RES = 0x02,  // Server response (1 byte)
-    MSG_CHUNKS    = 0x03   // Send chunk of file (1 byte)
+    MSG_CHUNKS   = 0x03   // Send chunk of file (1 byte)
 } msg_type_t;
 
 typedef struct Node{
     uint8_t type; //message type
     //uint8_t id; //chunk ID
     uint32_t filepath_len; //length of filepath string in big endian
-    const char *dest_filepath; //name of file in little endian
+    char *dest_filepath; //name of file in little endian
     uint64_t file_size; //size of file in big endian
     uint64_t payload_size; //size of payload
     unsigned char *payload; //content of payload
@@ -117,6 +117,14 @@ void print_c_buff(c_buff *buff){
     }
 }
 
+void print_protocol(file_node *data){
+    printf("TYPE: %" PRIu8 "\n",data->type);
+    printf("PAYLOAD_SIZE: %" PRIu64 "\n",data->payload_size);
+    printf("DESTINATION_PATH: %s\n",data->dest_filepath);
+    printf("FILE_SIZE: %" PRIu64 "\n",data->file_size);
+    printf("FILEPATH_LENGTH: %" PRIu32 "\n",data->filepath_len);
+}
+
 /**
      * Get size of file in bytes from local filesystem.
      * @param path path of file
@@ -149,8 +157,6 @@ uint64_t get_sv_filesize(int sockfd, file_node *data){
     receive_data(sockfd,&filesize);
     return filesize;
 }
-
-//TODO: remove chunkid from protocol
 
 /**
      * Writer of Circular Buffer. It writes payload from file to buffer
@@ -192,15 +198,14 @@ void* buff_writer(void *w_args){
 
         bytes_read=fread(data,1,args->segment_len,fd); //read segment from file
         temp_payload=malloc(bytes_read); //allocation of memory for payload
-        memcpy(temp_payload,data,bytes_read); //insert segment to payload
 
-        
         if(temp_payload==NULL){
             perror("[ERROR] Writer failed to memory allocation");
             free(data);
             fclose(fd);
             return NULL;
         }
+        memcpy(temp_payload,data,bytes_read); //insert segment to payload
 
         pthread_mutex_lock(&mutex); //lock for mute exclusion
         while(cb->count == cb->size){
@@ -214,6 +219,7 @@ void* buff_writer(void *w_args){
         cb->buff[cb->tail].type=node->type;
         cb->buff[cb->tail].payload_size = bytes_read;
         cb->buff[cb->tail].payload = temp_payload;
+        print_protocol(&cb->buff[cb->tail]);
 
         cb->tail = (cb->tail + 1) % cb->size; //if tail is 49 --> return 50 % 50 = 0 (so, return to start of array buffer)
         cb->count++;
@@ -333,7 +339,6 @@ int get_entry( const char *filepath, const struct stat *info,
         data.dest_filepath=malloc(strlen(ctx.server_path) + strlen(filepath) + 1);
         strcpy(data.dest_filepath,ctx.server_path);
         strcat(data.dest_filepath,filepath);
-        data.dest_filepath=filepath;
         data.filepath_len=strlen(filepath);
         data.file_size=bytes;
 

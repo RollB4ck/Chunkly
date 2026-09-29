@@ -8,9 +8,11 @@
 #include <netinet/tcp.h> 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <fcntl.h>
 
 #define PORT 5000
 #define MAX_CONN 20
+#define CHUNK_SIZE 512
 
 /*
 Representation of sockaddr struct. Is usefull annotation for socket coding:
@@ -38,7 +40,7 @@ static transfer_context_t ctx;
 int open_tcp_socket(){
     struct sockaddr_in addr;
     struct hostent *h;
-    int sockfd;
+    int sockfd, opt=1;
     char *ip_addr;
 
     sockfd=socket(PF_INET, SOCK_STREAM, 0);
@@ -46,6 +48,14 @@ int open_tcp_socket(){
         printf("[ERROR] Socket creation failed\n");
         return -1;
     }
+
+    //useful to free the port binding before code termination
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("[ERROR] setsockopt(SO_REUSEADDR) failed");
+        close(sockfd);
+        return -1;
+    }
+
     addr.sin_family=AF_INET;
     addr.sin_port=htons(PORT);
     if (inet_pton(AF_INET, "0.0.0.0", &addr.sin_addr) <= 0) { //inet_pton convert ipv4/ipv6 from text to binary
@@ -86,7 +96,7 @@ int accept_connection(int sockfd){
     int new_sockfd;
     new_sockfd=accept(sockfd,ctx.addr,&ctx.len);
     if(new_sockfd < 0){
-        printf("[ERROR] Accept incoming connection failed\n");
+        printf("[ERROR] Accept incoming connection failed:\n");
         return -1;
     }
     return new_sockfd;
@@ -124,4 +134,54 @@ int receive_data(int sockfd, uint64_t *buff){
     }else{
         return bytes_rcv;
     }
+}
+
+int recv_timeout(int s , int timeout)
+{
+	int size_recv , total_size= 0;
+	struct timeval begin , now;
+	char chunk[CHUNK_SIZE];
+	double timediff;
+	
+	//make socket non blocking
+	fcntl(s, F_SETFL, O_NONBLOCK);
+	
+	//beginning time
+	gettimeofday(&begin , NULL);
+	
+	while(1)
+	{
+		gettimeofday(&now , NULL);
+		
+		//time elapsed in seconds
+		timediff = (now.tv_sec - begin.tv_sec) + 1e-6 * (now.tv_usec - begin.tv_usec);
+		
+		//if you got some data, then break after timeout
+		if( total_size > 0 && timediff > timeout )
+		{
+			break;
+		}
+		
+		//if you got no data at all, wait a little longer, twice the timeout
+		else if( timediff > timeout*2)
+		{
+			break;
+		}
+		
+		memset(chunk ,0 , CHUNK_SIZE);	//clear the variable
+		if((size_recv =  recv(s , chunk , CHUNK_SIZE , 0) ) < 0)
+		{
+			//if nothing was received then we want to wait a little before trying again, 0.1 seconds
+			usleep(100000);
+		}
+		else
+		{
+			total_size += size_recv;
+			printf("%s" , chunk);
+			//reset beginning time
+			gettimeofday(&begin , NULL);
+		}
+	}
+	
+	return total_size;
 }

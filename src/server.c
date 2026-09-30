@@ -27,13 +27,13 @@ int main(int argc, char* argv[]){
         }
         if (p == 0){
             //child process
-            uint64_t *header;
+            char *header;
             int bytes_rcv;
             close(sockfd);
                 //TODO: codice per gestire il file
             printf("[DEBUG] child socket: %d\n",new_sockfd);
-            bytes_rcv=receive_data(new_sockfd,header);
-            printf("bytes: %d raw: %" PRIu64 "\n",bytes_rcv,*header);
+            bytes_rcv=receive_data(new_sockfd,&header);
+            printf("bytes: %d raw: %s\n",bytes_rcv,header);
             close(new_sockfd);
             exit(0);
         }else{

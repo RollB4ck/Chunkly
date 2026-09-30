@@ -120,68 +120,52 @@ int send_data(int sockfd, const void* buff, size_t buff_len){
     return 0;
 }
 
+
 /**
      * Receive TCP data from host (used for small responses returned by server, max 8 bytes).
      * @param sockfd socket descriptor
      * @param buff pointer to message
      * @return number of bytes received
      */
-int receive_data(int sockfd, uint64_t *buff){
-    int bytes_rcv;
-    bytes_rcv = recv(sockfd, buff, 8, 0);
-    if (bytes_rcv < 0){
-        printf("[ERROR] Response by client failed\n");
-    }else{
-        return bytes_rcv;
-    }
-}
-
-int recv_timeout(int s , int timeout)
+int receive_data(int sockfd,char** out_buff)
 {
-	int size_recv , total_size= 0;
-	struct timeval begin , now;
+	int size_recv , total_size=0;
 	char chunk[CHUNK_SIZE];
-	double timediff;
+    char* buff=NULL, *temp=NULL;
+    if (out_buff == NULL){
+        printf("[ERROR] memory failure\n");
+        return -1;
+    }
 	
 	//make socket non blocking
-	fcntl(s, F_SETFL, O_NONBLOCK);
-	
-	//beginning time
-	gettimeofday(&begin , NULL);
+	fcntl(sockfd, F_SETFL, O_NONBLOCK);
 	
 	while(1)
 	{
-		gettimeofday(&now , NULL);
-		
-		//time elapsed in seconds
-		timediff = (now.tv_sec - begin.tv_sec) + 1e-6 * (now.tv_usec - begin.tv_usec);
-		
-		//if you got some data, then break after timeout
-		if( total_size > 0 && timediff > timeout )
-		{
-			break;
-		}
-		
-		//if you got no data at all, wait a little longer, twice the timeout
-		else if( timediff > timeout*2)
-		{
-			break;
-		}
-		
 		memset(chunk ,0 , CHUNK_SIZE);	//clear the variable
-		if((size_recv =  recv(s , chunk , CHUNK_SIZE , 0) ) < 0)
-		{
-			//if nothing was received then we want to wait a little before trying again, 0.1 seconds
-			usleep(100000);
-		}
-		else
-		{
-			total_size += size_recv;
-			printf("%s" , chunk);
-			//reset beginning time
-			gettimeofday(&begin , NULL);
-		}
+        size_recv =  recv(sockfd , chunk , CHUNK_SIZE , 0);
+        if (size_recv<0){
+            printf("[ERROR] Get data from client failed\n");
+            free(buff);
+            *out_buff=NULL;
+            return -1;
+        }else if(size_recv == 0){
+            break;
+        }
+        total_size += size_recv;
+
+        temp = realloc(buff, total_size+1);
+        if (temp == NULL){
+
+            printf("[ERROR] Memory reallocation failed\n");
+            free(buff);
+            *out_buff=NULL;
+            return -1;
+        }
+        buff=temp;
+        memcpy(buff+total_size,chunk,size_recv);
+        buff[total_size]='\0';
 	}
-	
+    *out_buff=buff;
 	return total_size;
 }

@@ -111,61 +111,45 @@ int accept_connection(int sockfd){
      */
 int send_data(int sockfd, const void* buff, size_t buff_len){
     int bytes_sent;
-    bytes_sent = send(sockfd, buff, buff_len, 0);
-    if (bytes_sent < 0){
-        printf("[ERROR] Send data to host failed\n");
-    }else{
-        return bytes_sent;
-    }
-    return 0;
-}
+    int total=0; //bytes sent
+    int bytesleft=buff_len; //bytes to send
 
+    while (total < bytesleft){
+        bytes_sent = send(sockfd, buff, buff_len, 0);
+        if (bytes_sent < 0){
+            printf("[ERROR] Send data to host failed\n");
+            total = 0;
+            break;
+        }
+        total = total + bytes_sent;
+        bytesleft = bytesleft-bytes_sent;
+    }
+    return total;
+}
 
 /**
      * Receive TCP data from host (used for small responses returned by server, max 8 bytes).
      * @param sockfd socket descriptor
      * @param buff pointer to message
+     * @param len expected length of buffer
      * @return number of bytes received
      */
-int receive_data(int sockfd,char** out_buff)
-{
-	int size_recv , total_size=0;
-	char chunk[CHUNK_SIZE];
-    char* buff=NULL, *temp=NULL;
-    if (out_buff == NULL){
-        printf("[ERROR] memory failure\n");
+int receive_data(int sockfd,char** buff, int len){
+	int size_recv, bytes_read=0;
+    *buff=malloc(len);
+    if(*buff == NULL){
+        printf("[ERROR] Memory failure\n");
         return -1;
     }
-	
-	//make socket non blocking
-	fcntl(sockfd, F_SETFL, O_NONBLOCK);
-	
-	while(1)
+	while(bytes_read < len)
 	{
-		memset(chunk ,0 , CHUNK_SIZE);	//clear the variable
-        size_recv =  recv(sockfd , chunk , CHUNK_SIZE , 0);
-        if (size_recv<0){
-            printf("[ERROR] Get data from client failed\n");
-            free(buff);
-            *out_buff=NULL;
-            return -1;
-        }else if(size_recv == 0){
-            break;
-        }
-        total_size += size_recv;
-
-        temp = realloc(buff, total_size+1);
-        if (temp == NULL){
-
-            printf("[ERROR] Memory reallocation failed\n");
-            free(buff);
-            *out_buff=NULL;
+        size_recv =  recv(sockfd , *buff + bytes_read , len - bytes_read , 0);
+        if(size_recv <=0 ){
+            printf("[ERROR] Connection closed \n");
             return -1;
         }
-        buff=temp;
-        memcpy(buff+total_size,chunk,size_recv);
-        buff[total_size]='\0';
+        bytes_read=bytes_read+size_recv;
+        
 	}
-    *out_buff=buff;
-	return total_size;
+	return bytes_read;
 }

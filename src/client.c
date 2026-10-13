@@ -58,7 +58,7 @@ typedef struct Header{
     uint32_t filepath_len; //length of filepath string in big endian
     char dest_filepath[256]; //name of file in little endian
     uint64_t file_size; //size of file in big endian
-
+    uint64_t payload_size; //size of payload
 }file_header;
 
 typedef struct Node{
